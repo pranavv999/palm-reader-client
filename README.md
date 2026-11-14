@@ -14,7 +14,9 @@ A modern React application that performs **real-time hand landmark tracking** an
 * **🎯 Live MediaPipe Hand Guidance**: Real-time 21-point 3D hand tracking provides a visual skeleton guide (neon green bones with red joint nodes) to ensure proper hand alignment before capture.
 * **📐 Intelligent Knuckle-to-Wrist Auto-Crop**: Automatically detects MCP knuckles (landmarks 5, 9, 13, 17) and wrist (landmark 0) to frame and extract a tight palm bed ROI.
 * **✨ Smooth Dotted Keypoint Trajectory**: Renders smooth Catmull-Rom spline curves with glow and 10 tracked keypoint bead nodes along each crease line, matching professional biometric visualization standards.
-* **📱 Mobile-Optimized**: Designed for iOS Safari and Android Chrome with rear/front camera toggling and touch controls.
+* **💻 Desktop File Upload**: Automatically detects desktop devices and provides an intuitive Drag & Drop zone for high-res palm photo uploads (JPEG, PNG, WEBP), alongside webcam support.
+* **📱 Mobile-Optimized**: Defaults to live camera with real-time MediaPipe overlay on smartphones, with front/rear toggling and a gallery upload shortcut.
+* **🏷️ Separated & Labeled JSON Data**: Outputs cleanly labeled sections distinguishing `mediapipe_hand_tracking` (21 named anatomical joints with 3D normalized & pixel coords) from `palm_lines_detection` (neural network crease trajectories and confidences).
 
 ---
 

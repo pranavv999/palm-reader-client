@@ -32,12 +32,89 @@ export async function getOnnxSession() {
   }
 }
 
+// 21 Landmark Joint Names for Google MediaPipe Hand Landmarker
+export const MEDIAPIPE_LANDMARK_NAMES = [
+  'WRIST',
+  'THUMB_CMC', 'THUMB_MCP', 'THUMB_IP', 'THUMB_TIP',
+  'INDEX_FINGER_MCP', 'INDEX_FINGER_PIP', 'INDEX_FINGER_DIP', 'INDEX_FINGER_TIP',
+  'MIDDLE_FINGER_MCP', 'MIDDLE_FINGER_PIP', 'MIDDLE_FINGER_DIP', 'MIDDLE_FINGER_TIP',
+  'RING_FINGER_MCP', 'RING_FINGER_PIP', 'RING_FINGER_DIP', 'RING_FINGER_TIP',
+  'PINKY_MCP', 'PINKY_PIP', 'PINKY_DIP', 'PINKY_TIP'
+];
+
 /**
- * Crops the palm bed into a standardized 640x640 offscreen canvas based on MediaPipe landmarks.
+ * Builds structured, cleanly labeled JSON distinguishing MediaPipe tracking from Line Detection.
  */
-export function cropPalmFromVideo(video, landmarks) {
-  const vW = video.videoWidth;
-  const vH = video.videoHeight;
+export function buildResultJson({
+  scanSource = 'camera_scan',
+  deviceType = 'mobile',
+  imageWidth,
+  imageHeight,
+  inferenceMs = 0,
+  landmarks = null,
+  handedness = 'Unknown',
+  cropBox = null,
+  predictions = []
+}) {
+  const formattedLandmarks = (landmarks || []).map((pt, idx) => ({
+    id: idx,
+    joint_name: MEDIAPIPE_LANDMARK_NAMES[idx] || `LANDMARK_${idx}`,
+    normalized_coordinates: {
+      x: Math.round(pt.x * 10000) / 10000,
+      y: Math.round(pt.y * 10000) / 10000,
+      z: Math.round((pt.z || 0) * 10000) / 10000
+    },
+    pixel_coordinates: {
+      x: Math.round(pt.x * imageWidth),
+      y: Math.round(pt.y * imageHeight)
+    }
+  }));
+
+  return {
+    scan_metadata: {
+      scan_source: scanSource, // 'file_upload' | 'camera_scan'
+      device_type: deviceType, // 'desktop' | 'mobile'
+      timestamp: new Date().toISOString(),
+      image_resolution: {
+        width: imageWidth,
+        height: imageHeight
+      },
+      inference_time_ms: Math.round(inferenceMs)
+    },
+    mediapipe_hand_tracking: {
+      hand_detected: !!(landmarks && landmarks.length > 0),
+      handedness: handedness || 'Unknown',
+      landmarks_count: formattedLandmarks.length,
+      landmarks: formattedLandmarks,
+      palm_bed_roi: cropBox ? {
+        x1: cropBox.x1,
+        y1: cropBox.y1,
+        x2: cropBox.x2,
+        y2: cropBox.y2,
+        width: cropBox.width,
+        height: cropBox.height
+      } : null
+    },
+    palm_lines_detection: (predictions || []).map((p) => ({
+      line_class: p.class,
+      line_name: p.name,
+      anatomical_name: p.desc,
+      confidence_score: p.confidence,
+      confidence_percentage: `${Math.round(p.confidence * 100)}%`,
+      keypoints_count: (p.keypoints || []).length,
+      color_hex: p.color,
+      keypoints: p.keypoints || [],
+      crop_keypoints: p.cropKeypoints || p.crop_keypoints || []
+    }))
+  };
+}
+
+/**
+ * Crops the palm bed from any visual source (video, image, or canvas) based on MediaPipe landmarks.
+ */
+export function cropPalmFromSource(source, landmarks) {
+  const vW = source.videoWidth || source.naturalWidth || source.width;
+  const vH = source.videoHeight || source.naturalHeight || source.height;
 
   let x1, y1, x2, y2;
 
@@ -95,14 +172,14 @@ export function cropPalmFromVideo(video, landmarks) {
   fullCanvas.width = vW;
   fullCanvas.height = vH;
   const fullCtx = fullCanvas.getContext('2d');
-  fullCtx.drawImage(video, 0, 0, vW, vH);
+  fullCtx.drawImage(source, 0, 0, vW, vH);
 
   // 2. High-res cropped palm canvas (matches cropBox width & height 1:1)
   const cropCanvas = document.createElement('canvas');
   cropCanvas.width = cropW;
   cropCanvas.height = cropH;
   const cropCtx = cropCanvas.getContext('2d');
-  cropCtx.drawImage(video, x1, y1, cropW, cropH, 0, 0, cropW, cropH);
+  cropCtx.drawImage(source, x1, y1, cropW, cropH, 0, 0, cropW, cropH);
 
   // 3. 640x640 model input canvas (used for feeding ONNX tensor)
   const modelCanvas = document.createElement('canvas');
@@ -118,6 +195,8 @@ export function cropPalmFromVideo(video, landmarks) {
     cropBox: { x1, y1, x2, y2, width: cropW, height: cropH },
   };
 }
+
+export const cropPalmFromVideo = cropPalmFromSource;
 
 /**
  * Runs client-side ONNX inference on the 640x640 canvas and decodes keypoints.

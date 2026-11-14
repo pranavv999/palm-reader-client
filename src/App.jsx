@@ -1,7 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
-import { Camera, RefreshCw, Sparkles, Copy, Check, Layers, Code, Split, ArrowLeft, Cpu } from 'lucide-react';
-import { getOnnxSession, cropPalmFromVideo, detectPalmLinesClient, renderOverlay } from './utils/palmDetector';
+import {
+  Camera,
+  RefreshCw,
+  Sparkles,
+  Copy,
+  Check,
+  Layers,
+  Code,
+  Split,
+  ArrowLeft,
+  Cpu,
+  UploadCloud,
+  FileImage,
+  Monitor,
+  Smartphone
+} from 'lucide-react';
+import {
+  getOnnxSession,
+  cropPalmFromSource,
+  detectPalmLinesClient,
+  renderOverlay,
+  buildResultJson
+} from './utils/palmDetector';
 
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],       // Thumb
@@ -12,15 +33,25 @@ const HAND_CONNECTIONS = [
   [0, 17]                               // Palm base
 ];
 
+const isMobileDevice = () => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  return mobileRegex.test(ua) || (isTouch && window.innerWidth <= 820);
+};
+
 export default function App() {
-  const [mode, setMode] = useState('camera'); // 'camera' | 'processing' | 'result'
+  const [isMobile] = useState(isMobileDevice());
+  const [inputMethod, setInputMethod] = useState(isMobile ? 'camera' : 'upload'); // 'upload' | 'camera'
+  const [mode, setMode] = useState('input'); // 'input' | 'processing' | 'result'
   const [handDetected, setHandDetected] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Loading Client-Side AI Models...');
   const [facingMode, setFacingMode] = useState('environment'); // Default to rear camera
   const [results, setResults] = useState(null);
   const [activeTab, setActiveTab] = useState('overlay');
   const [copied, setCopied] = useState(false);
-  const [inferenceTime, setInferenceTime] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -28,6 +59,8 @@ export default function App() {
   const onnxSessionRef = useRef(null);
   const animationFrameRef = useRef(null);
   const currentLandmarksRef = useRef(null);
+  const currentHandednessRef = useRef('Unknown');
+  const fileInputRef = useRef(null);
 
   // 1. Initialize Both MediaPipe and ONNX in Browser Memory (Zero Backend)
   useEffect(() => {
@@ -56,14 +89,16 @@ export default function App() {
         if (!isMounted) return;
         landmarkerRef.current = handLandmarker;
 
-        // Load 10.7 MB ONNX model into WebAssembly/WebGPU memory
+        // Load 10.7 MB ONNX model into WebAssembly memory
         setStatusMessage('2/2: Loading 10.7 MB Palm Line Model...');
         const session = await getOnnxSession();
         if (!isMounted) return;
         onnxSessionRef.current = session;
 
-        setStatusMessage('Align your palm within view');
-        startCamera(facingMode);
+        setStatusMessage('AI Models Ready!');
+        if (inputMethod === 'camera') {
+          startCamera(facingMode);
+        }
       } catch (err) {
         console.error('Model initialization error:', err);
         setStatusMessage('Init error: ' + err.message);
@@ -78,6 +113,17 @@ export default function App() {
       if (landmarkerRef.current) landmarkerRef.current.close();
     };
   }, []);
+
+  // Switch camera when inputMethod changes
+  useEffect(() => {
+    if (inputMethod === 'camera') {
+      if (landmarkerRef.current && onnxSessionRef.current) {
+        startCamera(facingMode);
+      }
+    } else {
+      stopCamera();
+    }
+  }, [inputMethod]);
 
   // 2. Camera Management
   const startCamera = async (facing) => {
@@ -150,6 +196,9 @@ export default function App() {
         if (detections.landmarks && detections.landmarks.length > 0) {
           const landmarks = detections.landmarks[0];
           currentLandmarksRef.current = landmarks;
+          if (detections.handednesses && detections.handednesses.length > 0 && detections.handednesses[0].length > 0) {
+            currentHandednessRef.current = detections.handednesses[0][0].categoryName || 'Unknown';
+          }
           setHandDetected(true);
           setStatusMessage('Palm Detected! Hold steady & tap capture');
 
@@ -191,7 +240,7 @@ export default function App() {
     render();
   };
 
-  // 4. Capture & 100% Client-Side Detection (Zero Network Call)
+  // 4. Capture from Live Camera
   const handleCapture = async () => {
     const video = videoRef.current;
     const session = onnxSessionRef.current;
@@ -199,41 +248,50 @@ export default function App() {
 
     setMode('processing');
     setStatusMessage('Analyzing palm creases 100% on device...');
-
-    // Small delay to allow UI spinner to paint
     await new Promise((r) => setTimeout(r, 60));
 
     try {
-      // Step A: Auto-crop palm bed using MediaPipe landmarks on in-memory canvas
-      const { fullCanvas, cropCanvas, modelCanvas, cropBox } = cropPalmFromVideo(video, currentLandmarksRef.current);
+      const landmarks = currentLandmarksRef.current;
+      const handedness = currentHandednessRef.current;
+      const { fullCanvas, cropCanvas, modelCanvas, cropBox } = cropPalmFromSource(video, landmarks);
       stopCamera();
 
-      // Step B: Run ONNX Keypoint Model directly in JavaScript / WebAssembly
+      // Run ONNX Keypoint Model directly in WebAssembly
       const { predictions, inferenceMs } = await detectPalmLinesClient(
         session,
         modelCanvas,
         cropBox,
         fullCanvas.width,
         fullCanvas.height,
-        0.20 // confidence threshold
+        0.20
       );
 
-      setInferenceTime(inferenceMs);
-
-      // Step C: Render overlays onto client canvases
-      // 1. Full Hand with smooth lines
+      // Render overlays
       const overlayCanvas = document.createElement('canvas');
       renderOverlay(overlayCanvas, fullCanvas, predictions, cropBox);
 
-      // 2. Cropped Palm only (rendered at full native crop resolution, matching cropKeypoints 1:1)
       const croppedCanvas = document.createElement('canvas');
       renderOverlay(croppedCanvas, cropCanvas, predictions, null);
+
+      // Format complete, cleanly labeled JSON distinguishing MediaPipe from Line Detection
+      const dataJson = buildResultJson({
+        scanSource: 'camera_scan',
+        deviceType: isMobile ? 'mobile' : 'desktop',
+        imageWidth: fullCanvas.width,
+        imageHeight: fullCanvas.height,
+        inferenceMs,
+        landmarks,
+        handedness,
+        cropBox,
+        predictions
+      });
 
       setResults({
         overlayImage: overlayCanvas.toDataURL('image/jpeg', 0.88),
         croppedImage: croppedCanvas.toDataURL('image/jpeg', 0.88),
         rawImage: fullCanvas.toDataURL('image/jpeg', 0.85),
         predictions,
+        dataJson,
         cropBox,
         inferenceMs,
       });
@@ -242,20 +300,139 @@ export default function App() {
     } catch (err) {
       console.error('Client-side processing error:', err);
       alert('Client execution error: ' + err.message);
-      setMode('camera');
+      setMode('input');
       startCamera(facingMode);
+    }
+  };
+
+  // 5. File Upload Handler (Desktop & Mobile)
+  const processImageFile = async (file) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload a valid image file (JPEG, PNG, WEBP).');
+      return;
+    }
+
+    const session = onnxSessionRef.current;
+    const landmarker = landmarkerRef.current;
+    if (!session || !landmarker) {
+      alert('AI models are still initializing. Please wait a few seconds and try again.');
+      return;
+    }
+
+    setMode('processing');
+    setStatusMessage('Running MediaPipe hand tracking & palm crease detection...');
+    await new Promise((r) => setTimeout(r, 60));
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const img = new Image();
+        img.onload = async () => {
+          try {
+            // Draw uploaded image onto canvas
+            const imgCanvas = document.createElement('canvas');
+            imgCanvas.width = img.naturalWidth || img.width;
+            imgCanvas.height = img.naturalHeight || img.height;
+            const ctx = imgCanvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+
+            // Run MediaPipe Hand Landmarker on uploaded image
+            let landmarks = null;
+            let handedness = 'Unknown';
+            const detections = landmarker.detectForVideo(imgCanvas, performance.now());
+            if (detections.landmarks && detections.landmarks.length > 0) {
+              landmarks = detections.landmarks[0];
+              if (detections.handednesses && detections.handednesses.length > 0 && detections.handednesses[0].length > 0) {
+                handedness = detections.handednesses[0][0].categoryName || 'Unknown';
+              }
+            }
+
+            // Crop palm bed (anchored to knuckles and wrist, or center fallback)
+            const { fullCanvas, cropCanvas, modelCanvas, cropBox } = cropPalmFromSource(imgCanvas, landmarks);
+
+            // Run ONNX Keypoint Model in WebAssembly
+            const { predictions, inferenceMs } = await detectPalmLinesClient(
+              session,
+              modelCanvas,
+              cropBox,
+              fullCanvas.width,
+              fullCanvas.height,
+              0.20
+            );
+
+            // Render overlays
+            const overlayCanvas = document.createElement('canvas');
+            renderOverlay(overlayCanvas, fullCanvas, predictions, cropBox);
+
+            const croppedCanvas = document.createElement('canvas');
+            renderOverlay(croppedCanvas, cropCanvas, predictions, null);
+
+            // Clean, labeled JSON distinguishing MediaPipe from Line Detection
+            const dataJson = buildResultJson({
+              scanSource: 'file_upload',
+              deviceType: isMobile ? 'mobile' : 'desktop',
+              imageWidth: fullCanvas.width,
+              imageHeight: fullCanvas.height,
+              inferenceMs,
+              landmarks,
+              handedness,
+              cropBox,
+              predictions
+            });
+
+            setResults({
+              overlayImage: overlayCanvas.toDataURL('image/jpeg', 0.88),
+              croppedImage: croppedCanvas.toDataURL('image/jpeg', 0.88),
+              rawImage: fullCanvas.toDataURL('image/jpeg', 0.85),
+              predictions,
+              dataJson,
+              cropBox,
+              inferenceMs,
+            });
+
+            setMode('result');
+          } catch (innerErr) {
+            console.error('Inference error:', innerErr);
+            alert('Failed to process image: ' + innerErr.message);
+            setMode('input');
+          }
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error('File reading error:', err);
+      alert('Error reading uploaded file: ' + err.message);
+      setMode('input');
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processImageFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleFileInputChange = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      processImageFile(e.target.files[0]);
     }
   };
 
   const handleRetake = () => {
     setResults(null);
-    setMode('camera');
-    startCamera(facingMode);
+    setMode('input');
+    if (inputMethod === 'camera') {
+      startCamera(facingMode);
+    }
   };
 
   const copyJson = () => {
-    if (!results) return;
-    navigator.clipboard.writeText(JSON.stringify(results.predictions, null, 2));
+    if (!results || !results.dataJson) return;
+    navigator.clipboard.writeText(JSON.stringify(results.dataJson, null, 2));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -270,46 +447,118 @@ export default function App() {
             <h1 className="app-title">Palm Reader AI</h1>
           </div>
         </div>
-        <span className="model-tag" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.3)' }}>
-          <Cpu size={12} style={{ display: 'inline', marginRight: 4 }} />
-          100% Client-Side
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="model-tag" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.3)' }}>
+            <Cpu size={12} style={{ display: 'inline', marginRight: 4 }} />
+            100% Client-Side
+          </span>
+        </div>
       </header>
 
-      {/* ── View 1: Live Camera & MediaPipe Tracking ──────────────── */}
-      {mode === 'camera' && (
+      {/* ── View 1: Input Screen (Camera OR File Upload) ───────────── */}
+      {mode === 'input' && (
         <>
-          <div className="camera-stage">
-            <video ref={videoRef} playsInline autoPlay muted className="video-feed" />
-            <canvas ref={canvasRef} className="canvas-overlay" />
-
-            {/* Target Alignment Box */}
-            <div className={`palm-target-guide ${handDetected ? 'active' : ''}`} />
-
-            {/* Live Status Pill */}
-            <div className="status-pill">
-              <span className={`status-dot ${handDetected ? 'active' : ''}`} />
-              <span>{statusMessage}</span>
-            </div>
-          </div>
-
-          {/* Bottom Camera Controls */}
-          <div className="camera-controls">
-            <button className="icon-btn" onClick={toggleCamera} title="Switch Camera">
-              <RefreshCw size={22} />
-            </button>
-
+          {/* Method Selector Tabs */}
+          <div className="input-toggle-bar">
             <button
-              className="shutter-btn"
-              onClick={handleCapture}
-              disabled={!onnxSessionRef.current}
-              title="Capture Palm"
+              className={`toggle-tab ${inputMethod === 'upload' ? 'active' : ''}`}
+              onClick={() => setInputMethod('upload')}
             >
-              <div className="shutter-inner" />
+              <FileImage size={15} style={{ marginRight: 6 }} />
+              Upload Image {(!isMobile) && '(Desktop)'}
             </button>
-
-            <div style={{ width: 48 }} />
+            <button
+              className={`toggle-tab ${inputMethod === 'camera' ? 'active' : ''}`}
+              onClick={() => setInputMethod('camera')}
+            >
+              <Camera size={15} style={{ marginRight: 6 }} />
+              Live Camera {(isMobile) && '(Mobile)'}
+            </button>
           </div>
+
+          {/* Mode A: Desktop & Mobile File Upload Dropzone */}
+          {inputMethod === 'upload' && (
+            <div className="upload-stage">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={handleFileInputChange}
+              />
+              <div
+                className={`dropzone ${isDragging ? 'dragover' : ''}`}
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              >
+                <div className="upload-icon-circle">
+                  <UploadCloud size={36} color="#3b82f6" />
+                </div>
+                <h3 className="upload-title">Drop your palm photo here</h3>
+                <p className="upload-subtitle">or click to browse from your device</p>
+                <div className="upload-badges">
+                  <span className="upload-badge">JPEG</span>
+                  <span className="upload-badge">PNG</span>
+                  <span className="upload-badge">WEBP</span>
+                  <span className="upload-badge">Up to 25 MB</span>
+                </div>
+              </div>
+
+              <div className="upload-instructions">
+                <p className="instruction-heading">💡 Guidelines for best detection:</p>
+                <ul className="instruction-list">
+                  <li>Hold palm flat and spread fingers naturally.</li>
+                  <li>Ensure bright, even lighting across the palm bed.</li>
+                  <li>Capture from wrist crease to knuckles clearly.</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* Mode B: Live Camera Stage with MediaPipe */}
+          {inputMethod === 'camera' && (
+            <>
+              <div className="camera-stage">
+                <video ref={videoRef} playsInline autoPlay muted className="video-feed" />
+                <canvas ref={canvasRef} className="canvas-overlay" />
+
+                {/* Target Alignment Box */}
+                <div className={`palm-target-guide ${handDetected ? 'active' : ''}`} />
+
+                {/* Live Status Pill */}
+                <div className="status-pill">
+                  <span className={`status-dot ${handDetected ? 'active' : ''}`} />
+                  <span>{statusMessage}</span>
+                </div>
+              </div>
+
+              {/* Bottom Camera Controls */}
+              <div className="camera-controls">
+                <button
+                  className="icon-btn"
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  title="Upload image from device"
+                >
+                  <FileImage size={22} />
+                </button>
+
+                <button
+                  className="shutter-btn"
+                  onClick={handleCapture}
+                  disabled={!onnxSessionRef.current}
+                  title="Capture Palm"
+                >
+                  <div className="shutter-inner" />
+                </button>
+
+                <button className="icon-btn" onClick={toggleCamera} title="Switch Camera">
+                  <RefreshCw size={22} />
+                </button>
+              </div>
+            </>
+          )}
         </>
       )}
 
@@ -319,7 +568,7 @@ export default function App() {
           <Sparkles className="animate-spin" size={48} color="#3b82f6" />
           <h3 style={{ marginTop: 20, fontWeight: 700 }}>Processing 100% On-Device</h3>
           <p style={{ color: '#94a3b8', fontSize: 13, marginTop: 6, textAlign: 'center' }}>
-            MediaPipe + ONNX WebAssembly running in your browser...
+            MediaPipe Hand Tracking + ONNX WebAssembly running in your browser...
           </p>
         </div>
       )}
@@ -327,11 +576,15 @@ export default function App() {
       {/* ── View 3: Complete Results Viewer ───────────────────────── */}
       {mode === 'result' && results && (
         <div className="result-container">
-          {/* Device Performance Banner */}
+          {/* Metadata & Tracking Banner */}
           <div style={{ background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: 12, padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
-            <span style={{ color: '#93c5fd', fontWeight: 600 }}>⚡ On-Device Runtime</span>
+            <span style={{ color: '#93c5fd', fontWeight: 600 }}>
+              {results.dataJson?.mediapipe_hand_tracking?.hand_detected
+                ? `🖐️ MediaPipe: ${results.dataJson.mediapipe_hand_tracking.handedness} Hand Tracked (21 Joints)`
+                : '⚠️ Fallback Center Crop'}
+            </span>
             <span style={{ fontFamily: 'monospace', color: '#60a5fa', fontWeight: 700 }}>
-              {results.inferenceMs} ms (Zero Backend)
+              {results.inferenceMs} ms
             </span>
           </div>
 
@@ -385,7 +638,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Tab 3: JSON Raw Data */}
+          {/* Tab 3: JSON Raw Data (Separated MediaPipe & Line Detection) */}
           {activeTab === 'json' && (
             <div style={{ position: 'relative' }}>
               <button
@@ -396,7 +649,7 @@ export default function App() {
               >
                 {copied ? <Check size={16} color="#10b981" /> : <Copy size={16} />}
               </button>
-              <pre className="json-box">{JSON.stringify(results.predictions, null, 2)}</pre>
+              <pre className="json-box">{JSON.stringify(results.dataJson, null, 2)}</pre>
             </div>
           )}
 
@@ -422,7 +675,7 @@ export default function App() {
           <div className="result-actions">
             <button className="primary-btn" onClick={handleRetake}>
               <ArrowLeft size={18} />
-              Take Another Scan
+              Analyze Another Palm
             </button>
           </div>
         </div>
