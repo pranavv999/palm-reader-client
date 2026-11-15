@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",
+    "heic2any": "^0.0.4",
     "lucide-react": "^0.395.0",
     "onnxruntime-web": "^1.31.1",
     "react": "^18.3.1",

@@ -23,6 +23,7 @@ import {
   renderOverlay,
   buildResultJson
 } from './utils/palmDetector';
+import { isSupportedImageFile, loadAndPrepareImage } from './utils/imageLoader';
 
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],       // Thumb
@@ -308,8 +309,8 @@ export default function App() {
   // 5. File Upload Handler (Desktop & Mobile)
   const processImageFile = async (file) => {
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      alert('Please upload a valid image file (JPEG, PNG, WEBP).');
+    if (!isSupportedImageFile(file)) {
+      alert('Please upload a valid image file (JPEG, PNG, WEBP, or iPhone HEIC).');
       return;
     }
 
@@ -321,89 +322,77 @@ export default function App() {
     }
 
     setMode('processing');
-    setStatusMessage('Running MediaPipe hand tracking & palm crease detection...');
-    await new Promise((r) => setTimeout(r, 60));
 
     try {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const img = new Image();
-        img.onload = async () => {
-          try {
-            // Draw uploaded image onto canvas
-            const imgCanvas = document.createElement('canvas');
-            imgCanvas.width = img.naturalWidth || img.width;
-            imgCanvas.height = img.naturalHeight || img.height;
-            const ctx = imgCanvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
+      // 1. Prepare image: handles HEIC conversion, aspect-preserving downscaling
+      const imgCanvas = await loadAndPrepareImage(file, 1600, (status) => setStatusMessage(status));
 
-            // Run MediaPipe Hand Landmarker on uploaded image
-            let landmarks = null;
-            let handedness = 'Unknown';
-            const detections = landmarker.detectForVideo(imgCanvas, performance.now());
-            if (detections.landmarks && detections.landmarks.length > 0) {
-              landmarks = detections.landmarks[0];
-              if (detections.handednesses && detections.handednesses.length > 0 && detections.handednesses[0].length > 0) {
-                handedness = detections.handednesses[0][0].categoryName || 'Unknown';
-              }
-            }
+      setStatusMessage('Tracking palm bed with Google MediaPipe...');
 
-            // Crop palm bed (anchored to knuckles and wrist, or center fallback)
-            const { fullCanvas, cropCanvas, modelCanvas, cropBox } = cropPalmFromSource(imgCanvas, landmarks);
-
-            // Run ONNX Keypoint Model in WebAssembly
-            const { predictions, inferenceMs } = await detectPalmLinesClient(
-              session,
-              modelCanvas,
-              cropBox,
-              fullCanvas.width,
-              fullCanvas.height,
-              0.20
-            );
-
-            // Render overlays
-            const overlayCanvas = document.createElement('canvas');
-            renderOverlay(overlayCanvas, fullCanvas, predictions, cropBox);
-
-            const croppedCanvas = document.createElement('canvas');
-            renderOverlay(croppedCanvas, cropCanvas, predictions, null);
-
-            // Clean, labeled JSON distinguishing MediaPipe from Line Detection
-            const dataJson = buildResultJson({
-              scanSource: 'file_upload',
-              deviceType: isMobile ? 'mobile' : 'desktop',
-              imageWidth: fullCanvas.width,
-              imageHeight: fullCanvas.height,
-              inferenceMs,
-              landmarks,
-              handedness,
-              cropBox,
-              predictions
-            });
-
-            setResults({
-              overlayImage: overlayCanvas.toDataURL('image/jpeg', 0.88),
-              croppedImage: croppedCanvas.toDataURL('image/jpeg', 0.88),
-              rawImage: fullCanvas.toDataURL('image/jpeg', 0.85),
-              predictions,
-              dataJson,
-              cropBox,
-              inferenceMs,
-            });
-
-            setMode('result');
-          } catch (innerErr) {
-            console.error('Inference error:', innerErr);
-            alert('Failed to process image: ' + innerErr.message);
-            setMode('input');
+      // 2. Safe MediaPipe detection on prepared canvas
+      let landmarks = null;
+      let handedness = 'Unknown';
+      try {
+        const detections = landmarker.detectForVideo(imgCanvas, performance.now());
+        if (detections && detections.landmarks && detections.landmarks.length > 0) {
+          landmarks = detections.landmarks[0];
+          if (detections.handednesses && detections.handednesses.length > 0 && detections.handednesses[0].length > 0) {
+            handedness = detections.handednesses[0][0].categoryName || 'Unknown';
           }
-        };
-        img.src = e.target.result;
-      };
-      reader.readAsDataURL(file);
+        }
+      } catch (mpErr) {
+        console.warn('MediaPipe tracking notice:', mpErr);
+      }
+
+      setStatusMessage('Detecting palm creases with ONNX WebAssembly...');
+
+      // 3. Crop palm bed (anchored to knuckles and wrist, or center fallback)
+      const { fullCanvas, cropCanvas, modelCanvas, cropBox } = cropPalmFromSource(imgCanvas, landmarks);
+
+      // 4. Run ONNX Keypoint Model in WebAssembly
+      const { predictions, inferenceMs } = await detectPalmLinesClient(
+        session,
+        modelCanvas,
+        cropBox,
+        fullCanvas.width,
+        fullCanvas.height,
+        0.20
+      );
+
+      // 5. Render overlays
+      const overlayCanvas = document.createElement('canvas');
+      renderOverlay(overlayCanvas, fullCanvas, predictions, cropBox);
+
+      const croppedCanvas = document.createElement('canvas');
+      renderOverlay(croppedCanvas, cropCanvas, predictions, null);
+
+      // 6. Clean, labeled JSON distinguishing MediaPipe from Line Detection
+      const dataJson = buildResultJson({
+        scanSource: 'file_upload',
+        deviceType: isMobile ? 'mobile' : 'desktop',
+        imageWidth: fullCanvas.width,
+        imageHeight: fullCanvas.height,
+        inferenceMs,
+        landmarks,
+        handedness,
+        cropBox,
+        predictions
+      });
+
+      setResults({
+        overlayImage: overlayCanvas.toDataURL('image/jpeg', 0.88),
+        croppedImage: croppedCanvas.toDataURL('image/jpeg', 0.88),
+        rawImage: fullCanvas.toDataURL('image/jpeg', 0.85),
+        predictions,
+        dataJson,
+        cropBox,
+        inferenceMs,
+      });
+
+      setMode('result');
     } catch (err) {
-      console.error('File reading error:', err);
-      alert('Error reading uploaded file: ' + err.message);
+      console.error('File processing error:', err);
+      alert('Error processing image: ' + err.message);
       setMode('input');
     }
   };
@@ -482,7 +471,7 @@ export default function App() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/*,.heic,.heif,.jpg,.jpeg,.png,.webp"
                 style={{ display: 'none' }}
                 onChange={handleFileInputChange}
               />
@@ -499,6 +488,7 @@ export default function App() {
                 <h3 className="upload-title">Drop your palm photo here</h3>
                 <p className="upload-subtitle">or click to browse from your device</p>
                 <div className="upload-badges">
+                  <span className="upload-badge">HEIC (iPhone)</span>
                   <span className="upload-badge">JPEG</span>
                   <span className="upload-badge">PNG</span>
                   <span className="upload-badge">WEBP</span>
